@@ -13,6 +13,7 @@ fn main() {
             win::set_size_locked,
             win::set_geometry,
             win::set_layered,
+            win::set_alias,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

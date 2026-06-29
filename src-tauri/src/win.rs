@@ -4,12 +4,25 @@
 //! through JS since handles fit comfortably below 2^53). Each mutating command records
 //! the handle in `MANAGED` so a window we have modified keeps showing up in the list even
 //! if a change (e.g. hiding from the taskbar) would otherwise drop it from the alt-tab set.
+//!
+//! `MANAGED` is persisted to disk so the guarantee survives a restart of WinTamer itself:
+//! a window we hid from the taskbar would otherwise become unrecoverable (filtered out by
+//! `is_listable`, with no in-memory record to override it) once the app is reopened. It also
+//! carries a user-chosen display name (`alias`) per window. Dead handles are pruned on every
+//! enumeration, so the store self-cleans as windows close.
+//!
+//! A raw HWND is not a safe cross-restart key on its own: between sessions the original window
+//! may have closed and its handle (or PID) been recycled by an unrelated process. So each entry
+//! also records the PID and process image name captured when we touched it, and on startup we
+//! re-validate every stored handle against the live system — keeping an entry only when the
+//! handle still resolves to the *same* PID *and* the same process. Mismatches are dropped.
 
 use core::ffi::c_void;
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, BOOL, COLORREF, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
@@ -26,12 +39,127 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_THICKFRAME,
 };
 
-/// Handles we have touched — always included in the listing, even when filtered out otherwise.
-static MANAGED: LazyLock<Mutex<HashSet<isize>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+/// What we remember about a window we have touched. The map key is the raw HWND (`isize`);
+/// `pid` + `proc_name` are the identity we re-validate against on the next launch.
+#[derive(Clone, Default)]
+struct Managed {
+    pid: u32,
+    proc_name: String,
+    /// User-chosen display name shown in the list instead of the OS title. `None` ⇒ use title.
+    alias: Option<String>,
+}
 
+/// On-disk shape of one entry (the in-memory key, the HWND, becomes an explicit field here).
+#[derive(Serialize, Deserialize)]
+struct StoredEntry {
+    hwnd: i64,
+    pid: u32,
+    #[serde(default)]
+    proc: String,
+    #[serde(default)]
+    alias: Option<String>,
+}
+
+/// Windows we have touched — always included in the listing, even when filtered out otherwise,
+/// and the home of per-window aliases. Seeded from disk on first use (with identity re-validation)
+/// so both the listing guarantee and custom names outlive a restart of WinTamer.
+static MANAGED: LazyLock<Mutex<HashMap<isize, Managed>>> =
+    LazyLock::new(|| Mutex::new(load_persisted()));
+
+/// Current (PID, process image name) of a window, as the identity we persist and re-check.
+unsafe fn pid_and_proc(h: HWND) -> (u32, String) {
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(h, Some(&mut pid));
+    (pid, process_name(pid))
+}
+
+/// Record (or refresh the identity of) a window we are about to modify, preserving any alias.
 fn mark(hwnd: i64) {
-    if let Ok(mut m) = MANAGED.lock() {
-        m.insert(hwnd as isize);
+    let (pid, proc_name) = unsafe { pid_and_proc(hwnd_from(hwnd)) };
+    // Clone-then-write so we never hold the lock across file I/O. Only persist on a real change,
+    // since `mark` is called on every mutating command.
+    let snapshot = {
+        let mut m = match MANAGED.lock() {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        match m.get_mut(&(hwnd as isize)) {
+            Some(e) if e.pid == pid && e.proc_name == proc_name => return,
+            Some(e) => {
+                e.pid = pid;
+                e.proc_name = proc_name;
+            }
+            None => {
+                m.insert(hwnd as isize, Managed { pid, proc_name, alias: None });
+            }
+        }
+        m.clone()
+    };
+    save_persisted(&snapshot);
+}
+
+/// `%LOCALAPPDATA%\WinTamer\managed-windows.txt` — a JSON array of [`StoredEntry`].
+fn store_path() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    let mut dir = PathBuf::from(base);
+    dir.push("WinTamer");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.push("managed-windows.txt");
+    Some(dir)
+}
+
+/// Read the store and re-validate each entry against the live system: keep it only if the
+/// handle still resolves to the same PID and the same process image. Entries that fail (window
+/// closed, handle/PID recycled by another program) are dropped, and the pruned set is rewritten.
+fn load_persisted() -> HashMap<isize, Managed> {
+    let mut map = HashMap::new();
+    let Some(path) = store_path() else {
+        return map;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return map;
+    };
+    let entries: Vec<StoredEntry> = serde_json::from_str(&text).unwrap_or_default();
+
+    let mut dropped = false;
+    for e in entries {
+        let h = hwnd_from(e.hwnd);
+        let still_same = unsafe {
+            IsWindow(h).as_bool() && {
+                let (pid, proc_name) = pid_and_proc(h);
+                pid == e.pid && proc_name == e.proc
+            }
+        };
+        if still_same {
+            map.insert(
+                e.hwnd as isize,
+                Managed { pid: e.pid, proc_name: e.proc, alias: e.alias },
+            );
+        } else {
+            dropped = true;
+        }
+    }
+    if dropped {
+        save_persisted(&map);
+    }
+    map
+}
+
+fn save_persisted(map: &HashMap<isize, Managed>) {
+    let Some(path) = store_path() else {
+        return;
+    };
+    let entries: Vec<StoredEntry> = map
+        .iter()
+        .map(|(&hwnd, m)| StoredEntry {
+            hwnd: hwnd as i64,
+            pid: m.pid,
+            proc: m.proc_name.clone(),
+            alias: m.alias.clone(),
+        })
+        .collect();
+    if let Ok(json) = serde_json::to_string(&entries) {
+        let _ = std::fs::write(path, json);
     }
 }
 
@@ -50,6 +178,8 @@ fn id_of(h: HWND) -> i64 {
 pub struct WindowInfo {
     hwnd: i64,
     title: String,
+    /// User-chosen display name, or `None` to fall back to `title`.
+    alias: Option<String>,
     app: String,
     #[serde(rename = "proc")]
     proc_name: String,
@@ -75,7 +205,7 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let list = &mut *(lparam.0 as *mut Vec<HWND>);
     let managed = MANAGED
         .lock()
-        .map(|m| m.contains(&(hwnd.0 as isize)))
+        .map(|m| m.contains_key(&(hwnd.0 as isize)))
         .unwrap_or(false);
     if is_listable(hwnd) || managed {
         list.push(hwnd);
@@ -114,10 +244,14 @@ unsafe fn is_listable(hwnd: HWND) -> bool {
     true
 }
 
-unsafe fn build_info(hwnd: HWND) -> Option<WindowInfo> {
+unsafe fn build_info(hwnd: HWND, managed: &HashMap<isize, Managed>) -> Option<WindowInfo> {
     if !IsWindow(hwnd).as_bool() {
         return None;
     }
+
+    let alias = managed
+        .get(&(hwnd.0 as isize))
+        .and_then(|m| m.alias.clone());
 
     let len = GetWindowTextLengthW(hwnd);
     let title = if len > 0 {
@@ -144,6 +278,7 @@ unsafe fn build_info(hwnd: HWND) -> Option<WindowInfo> {
     Some(WindowInfo {
         hwnd: id_of(hwnd),
         title,
+        alias,
         app,
         proc_name,
         pid,
@@ -232,12 +367,25 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, String> {
         EnumWindows(Some(enum_proc), LPARAM(&mut handles as *mut _ as isize))
             .map_err(|e| e.to_string())?;
 
-        // Drop dead handles from the managed set.
-        if let Ok(mut m) = MANAGED.lock() {
-            m.retain(|&id| IsWindow(HWND(id as *mut c_void)).as_bool());
-        }
+        // Drop dead handles from the managed set, and persist the prune so the on-disk
+        // store doesn't accumulate handles of windows that have since closed. Snapshot the
+        // surviving map for per-window alias lookup during `build_info`.
+        let managed = if let Ok(mut m) = MANAGED.lock() {
+            let before = m.len();
+            m.retain(|&id, _| IsWindow(HWND(id as *mut c_void)).as_bool());
+            let snapshot = m.clone();
+            if m.len() != before {
+                save_persisted(&snapshot);
+            }
+            snapshot
+        } else {
+            HashMap::new()
+        };
 
-        let mut out: Vec<WindowInfo> = handles.into_iter().filter_map(|h| build_info(h)).collect();
+        let mut out: Vec<WindowInfo> = handles
+            .into_iter()
+            .filter_map(|h| build_info(h, &managed))
+            .collect();
         out.sort_by(|a, b| {
             a.app
                 .to_lowercase()
@@ -369,6 +517,30 @@ pub fn set_layered(hwnd: i64, overlay: bool, translucent: bool, opacity: u8) -> 
     Ok(())
 }
 
+/// Set (or, with an empty/whitespace string, clear) the user-chosen display name for a window.
+/// Stored in `MANAGED` alongside the window's identity so it persists across restarts.
+#[tauri::command]
+pub fn set_alias(hwnd: i64, alias: String) -> Result<(), String> {
+    let trimmed = alias.trim();
+    let alias = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    let (pid, proc_name) = unsafe { pid_and_proc(hwnd_from(hwnd)) };
+
+    let snapshot = {
+        let mut m = MANAGED.lock().map_err(|e| e.to_string())?;
+        let entry = m.entry(hwnd as isize).or_insert_with(Managed::default);
+        entry.pid = pid;
+        entry.proc_name = proc_name;
+        entry.alias = alias;
+        m.clone()
+    };
+    save_persisted(&snapshot);
+    Ok(())
+}
+
 unsafe fn frame_changed(h: HWND) -> Result<(), String> {
     SetWindowPos(
         h,
@@ -382,4 +554,60 @@ unsafe fn frame_changed(h: HWND) -> Result<(), String> {
         ),
     )
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_entries_round_trip_through_json() {
+        let entries = vec![
+            StoredEntry {
+                hwnd: 123_456,
+                pid: 999,
+                proc: "notepad.exe".into(),
+                alias: Some("내 메모장".into()),
+            },
+            StoredEntry {
+                hwnd: -42,
+                pid: 1,
+                proc: "explorer.exe".into(),
+                alias: None,
+            },
+        ];
+        let json = serde_json::to_string(&entries).unwrap();
+        let back: Vec<StoredEntry> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].hwnd, 123_456);
+        assert_eq!(back[0].pid, 999);
+        assert_eq!(back[0].proc, "notepad.exe");
+        assert_eq!(back[0].alias.as_deref(), Some("내 메모장"));
+        assert_eq!(back[1].hwnd, -42);
+        assert_eq!(back[1].alias, None);
+    }
+
+    #[test]
+    fn legacy_or_garbage_store_loads_as_empty() {
+        // The first cut of this store wrote one decimal handle per line — not valid JSON.
+        // Loading such a file (or any corruption) must degrade to an empty set, never error.
+        let legacy = "12345\n67890\n";
+        let parsed: Vec<StoredEntry> = serde_json::from_str(legacy).unwrap_or_default();
+        assert!(parsed.is_empty());
+
+        let garbage = "{ not json";
+        let parsed: Vec<StoredEntry> = serde_json::from_str(garbage).unwrap_or_default();
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn missing_optional_fields_default_cleanly() {
+        // An entry written by an older/leaner writer (no proc, no alias) still loads.
+        let json = r#"[{"hwnd":7,"pid":3}]"#;
+        let back: Vec<StoredEntry> = serde_json::from_str(json).unwrap();
+        assert_eq!(back[0].hwnd, 7);
+        assert_eq!(back[0].proc, "");
+        assert_eq!(back[0].alias, None);
+    }
 }
