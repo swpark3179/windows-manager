@@ -1,0 +1,15 @@
+{
+  "name": "windows-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "창 관리자 (WinTamer) — Windows 창 관리 도구, Tauri 2.0",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icon": "node scripts/gen-icon.cjs icon-src.png && tauri icon icon-src.png"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

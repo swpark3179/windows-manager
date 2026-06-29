@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>창 관리자</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; }
+    body {
+      display: flex;
+      padding: 12px;
+      font-family: 'Segoe UI Variable', 'Segoe UI', 'Malgun Gothic', -apple-system, system-ui, sans-serif;
+    }
+    #card {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      border-radius: 9px;
+      overflow: hidden;
+      background: var(--bg, #f3f3f3);
+      color: var(--text, #1b1b1b);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, .30), 0 0 0 1px rgba(0, 0, 0, .06);
+      user-select: none;
+      -webkit-font-smoothing: antialiased;
+    }
+    ::-webkit-scrollbar { width: 9px; height: 9px; }
+    ::-webkit-scrollbar-thumb {
+      background: var(--scroll, rgba(0, 0, 0, .22));
+      border-radius: 5px;
+      border: 2px solid transparent;
+      background-clip: padding-box;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--scroll-h, rgba(0, 0, 0, .36));
+      background-clip: padding-box;
+    }
+    ::-webkit-scrollbar-track { background: transparent; }
+    input[type=range] { accent-color: var(--accent, #0067c0); }
+    input { font-family: inherit; }
+    input:focus { outline: none; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes pop { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+    /* Hover affordances (inline-style elements can't carry :hover) */
+    .hov:hover { background: var(--hover, rgba(0, 0, 0, .045)); }
+    .closehov:hover { background: var(--close-hover, #c42b1c) !important; color: #fff !important; }
+    .row:hover { background: var(--hover, rgba(0, 0, 0, .045)) !important; }
+    .search:focus { border-color: var(--accent, #0067c0) !important; }
+  </style>
+</head>
+<body>
+  <div id="card"></div>
+  <script src="./main.js" defer></script>
+</body>
+</html>
