@@ -72,12 +72,18 @@ function initialFor(app, title) {
 function getSel() {
   return state.windows.find((w) => w.hwnd === state.selectedId) || state.windows[0] || null;
 }
+// The name to show in the UI: the user's custom alias if set, else the real OS title.
+function displayName(w) {
+  const a = (w.alias || "").trim();
+  return a || w.title;
+}
 function filteredWindows() {
   const q = state.query.trim().toLowerCase();
   if (!q) return state.windows;
   return state.windows.filter(
     (w) =>
       w.title.toLowerCase().includes(q) ||
+      (w.alias || "").toLowerCase().includes(q) ||
       w.app.toLowerCase().includes(q) ||
       w.proc.toLowerCase().includes(q)
   );
@@ -154,7 +160,7 @@ function listHTML(list) {
       return `<div class="row" data-act="select" data-id="${w.hwnd}" style="${rowStyle}">
         <div style="${iconStyle}">${esc(initialFor(w.app, w.title))}</div>
         <div style="min-width:0;flex:1">
-          <div style="font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)">${esc(w.title)}</div>
+          <div style="font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)">${esc(displayName(w))}</div>
           <div style="font-size:10.5px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${esc(w.proc)} · PID ${w.pid}</div>
         </div>
         ${active ? `<div style="width:6px;height:6px;flex:none;border-radius:50%;background:var(--accent)"></div>` : ""}
@@ -239,12 +245,21 @@ function rightHTML() {
       <div style="display:flex;align-items:center;gap:12px;padding-bottom:14px;border-bottom:1px solid var(--line)">
         <div style="width:42px;height:42px;flex:none;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:700;color:#fff;background:${colorFor(sel.proc || sel.app)}">${esc(initialFor(sel.app, sel.title))}</div>
         <div style="min-width:0;flex:1">
-          <div style="font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(sel.title)}</div>
+          <div style="font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(displayName(sel))}</div>
           <div style="font-size:11.5px;color:var(--text2);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(sel.app)} · ${esc(sel.proc)} · PID ${sel.pid}</div>
         </div>
       </div>
 
-      <div style="font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text3);margin:16px 0 8px">현재 적용 상태</div>
+      <div style="font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text3);margin:16px 0 8px">표시 이름</div>
+      <div style="background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <input data-act="alias" value="${escAttr(sel.alias || "")}" placeholder="${escAttr(sel.title)}" maxlength="120" style="flex:1;min-width:0;height:30px;border-radius:6px;border:1px solid var(--control-line);background:var(--control);color:var(--text);font-size:13px;padding:0 10px" />
+          ${sel.alias ? `<div class="hov" data-act="alias-reset" title="원래 제목으로 되돌리기" style="width:30px;height:30px;flex:none;border-radius:6px;border:1px solid var(--control-line);background:var(--control);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text2);font-size:15px">↺</div>` : ""}
+        </div>
+        <div style="font-size:11px;color:var(--text2);margin-top:7px">목록에 표시할 이름입니다. 비워두면 원래 제목(<span style="color:var(--text3)">${esc(sel.title)}</span>)을 사용합니다.</div>
+      </div>
+
+      <div style="font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text3);margin:18px 0 8px">현재 적용 상태</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px">${badgesHTML}</div>
 
       <div style="font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text3);margin:20px 0 4px">동작</div>
@@ -342,6 +357,21 @@ async function applyGeom(w) {
   }
 }
 
+async function applyAlias(value) {
+  const w = getSel();
+  if (!w) return;
+  const v = String(value).trim();
+  if ((w.alias || "") === v) return; // unchanged — skip the round-trip
+  w.alias = v || null;
+  render();
+  try {
+    await invoke("set_alias", { hwnd: w.hwnd, alias: v });
+  } catch (err) {
+    console.error("set_alias failed:", err);
+    await loadWindows();
+  }
+}
+
 async function bumpGeom(key, d) {
   const w = getSel();
   if (!w) return;
@@ -414,6 +444,9 @@ function wireEvents() {
       case "geom-dec":
         await bumpGeom(t.dataset.key, -10);
         break;
+      case "alias-reset":
+        await applyAlias("");
+        break;
     }
   });
 
@@ -447,6 +480,8 @@ function wireEvents() {
       w[t.dataset.key] = isNaN(v) ? 0 : v;
       await applyGeom(w);
       render();
+    } else if (t.dataset.act === "alias") {
+      await applyAlias(t.value); // commit on blur / Enter
     } else if (t.dataset.act === "opacity") {
       render(); // sync the "반투명 X%" badge once the drag ends
     }
