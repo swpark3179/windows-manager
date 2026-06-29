@@ -1,0 +1,104 @@
+name: Release
+
+# v* 태그 푸시 시 자동 실행되며, 수동 실행(workflow_dispatch)도 지원합니다.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "릴리스 태그 (예: v0.1.0)"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 변경 이력(changelog) 산출을 위해 전체 히스토리 필요
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build standalone executable
+        run: npx tauri build --no-bundle
+
+      - name: Stage release asset
+        id: asset
+        shell: bash
+        run: |
+          mkdir -p dist-release
+          EXE="$(find src-tauri/target/release -maxdepth 1 -name '*.exe' | head -n1)"
+          if [ -z "$EXE" ]; then echo "::error::빌드된 exe를 찾지 못했습니다"; exit 1; fi
+          echo "built: $EXE"
+          cp "$EXE" "dist-release/WinTamer-${{ steps.ver.outputs.version }}-x64.exe"
+          ls -la dist-release
+
+      - name: Generate changelog
+        id: changelog
+        shell: bash
+        run: |
+          PREV="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+          {
+            echo "## 창 관리자 ${{ steps.ver.outputs.tag }}"
+            echo ""
+            echo "### 변경 이력"
+            echo ""
+            if [ -z "$PREV" ]; then
+              echo "최초 릴리스입니다. 전체 커밋 내역:"
+              echo ""
+              git log HEAD --pretty=format:'- %s (%h)'
+            else
+              echo "변경 범위: \`${PREV}\` → \`${{ steps.ver.outputs.tag }}\`"
+              echo ""
+              git log "${PREV}..HEAD" --pretty=format:'- %s (%h)'
+            fi
+            echo ""
+            echo ""
+            echo "### 다운로드"
+            echo ""
+            echo "- \`WinTamer-${{ steps.ver.outputs.version }}-x64.exe\` — Windows x64 단독 실행 파일 (WebView2 런타임 필요, Win10/11 기본 포함)"
+          } > CHANGELOG_RELEASE.md
+          cat CHANGELOG_RELEASE.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: 창 관리자 ${{ steps.ver.outputs.tag }}
+          body_path: CHANGELOG_RELEASE.md
+          files: dist-release/*.exe
+          fail_on_unmatched_files: true
