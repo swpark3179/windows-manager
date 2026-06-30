@@ -23,20 +23,22 @@ use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
-use windows::core::PWSTR;
+use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, BOOL, COLORREF, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::System::Threading::{
-    GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess,
+    QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetLayeredWindowAttributes, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST,
-    HWND_TOPMOST, LWA_ALPHA, SET_WINDOW_POS_FLAGS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_THICKFRAME,
+    BringWindowToTop, EnumWindows, GetForegroundWindow, GetLayeredWindowAttributes,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+    IsIconic, IsWindow, IsWindowVisible, SetForegroundWindow, SetLayeredWindowAttributes,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, GWL_EXSTYLE, GWL_STYLE,
+    HWND_NOTOPMOST, HWND_TOPMOST, LWA_ALPHA, SET_WINDOW_POS_FLAGS, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOWNA, WS_CAPTION,
+    WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_THICKFRAME,
 };
 
 /// What we remember about a window we have touched. The map key is the raw HWND (`isize`);
@@ -45,8 +47,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 struct Managed {
     pid: u32,
     proc_name: String,
-    /// User-chosen display name shown in the list instead of the OS title. `None` ⇒ use title.
+    /// User-chosen display name. When set, it is written to the real window title
+    /// (title bar + taskbar) via `SetWindowTextW`. `None` ⇒ the window keeps its own title.
     alias: Option<String>,
+    /// The window's original OS title, captured the first time we renamed it, so clearing
+    /// the alias can restore the real title. `None` ⇒ we have not renamed this window.
+    orig_title: Option<String>,
 }
 
 /// On-disk shape of one entry (the in-memory key, the HWND, becomes an explicit field here).
@@ -58,6 +64,8 @@ struct StoredEntry {
     proc: String,
     #[serde(default)]
     alias: Option<String>,
+    #[serde(default)]
+    orig_title: Option<String>,
 }
 
 /// Windows we have touched — always included in the listing, even when filtered out otherwise,
@@ -90,7 +98,10 @@ fn mark(hwnd: i64) {
                 e.proc_name = proc_name;
             }
             None => {
-                m.insert(hwnd as isize, Managed { pid, proc_name, alias: None });
+                m.insert(
+                    hwnd as isize,
+                    Managed { pid, proc_name, alias: None, orig_title: None },
+                );
             }
         }
         m.clone()
@@ -133,7 +144,12 @@ fn load_persisted() -> HashMap<isize, Managed> {
         if still_same {
             map.insert(
                 e.hwnd as isize,
-                Managed { pid: e.pid, proc_name: e.proc, alias: e.alias },
+                Managed {
+                    pid: e.pid,
+                    proc_name: e.proc,
+                    alias: e.alias,
+                    orig_title: e.orig_title,
+                },
             );
         } else {
             dropped = true;
@@ -156,6 +172,7 @@ fn save_persisted(map: &HashMap<isize, Managed>) {
             pid: m.pid,
             proc: m.proc_name.clone(),
             alias: m.alias.clone(),
+            orig_title: m.orig_title.clone(),
         })
         .collect();
     if let Ok(json) = serde_json::to_string(&entries) {
@@ -180,6 +197,9 @@ pub struct WindowInfo {
     title: String,
     /// User-chosen display name, or `None` to fall back to `title`.
     alias: Option<String>,
+    /// The window's original title before we renamed it, or `None` if untouched. Lets the UI
+    /// show the real title (and what "비우기" would restore) even after the live title is the alias.
+    orig_title: Option<String>,
     app: String,
     #[serde(rename = "proc")]
     proc_name: String,
@@ -249,18 +269,11 @@ unsafe fn build_info(hwnd: HWND, managed: &HashMap<isize, Managed>) -> Option<Wi
         return None;
     }
 
-    let alias = managed
-        .get(&(hwnd.0 as isize))
-        .and_then(|m| m.alias.clone());
+    let entry = managed.get(&(hwnd.0 as isize));
+    let alias = entry.and_then(|m| m.alias.clone());
+    let orig_title = entry.and_then(|m| m.orig_title.clone());
 
-    let len = GetWindowTextLengthW(hwnd);
-    let title = if len > 0 {
-        let mut buf = vec![0u16; (len + 1) as usize];
-        let n = GetWindowTextW(hwnd, &mut buf);
-        String::from_utf16_lossy(&buf[..n as usize])
-    } else {
-        String::new()
-    };
+    let title = window_title(hwnd);
 
     let mut pid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
@@ -279,6 +292,7 @@ unsafe fn build_info(hwnd: HWND, managed: &HashMap<isize, Managed>) -> Option<Wi
         hwnd: id_of(hwnd),
         title,
         alias,
+        orig_title,
         app,
         proc_name,
         pid,
@@ -308,6 +322,17 @@ unsafe fn layered_alpha(hwnd: HWND, ex: u32) -> (bool, u8) {
     } else {
         (false, 100)
     }
+}
+
+/// Read a window's current OS title (title-bar text). Empty string if it has none.
+unsafe fn window_title(hwnd: HWND) -> String {
+    let len = GetWindowTextLengthW(hwnd);
+    if len <= 0 {
+        return String::new();
+    }
+    let mut buf = vec![0u16; (len + 1) as usize];
+    let n = GetWindowTextW(hwnd, &mut buf);
+    String::from_utf16_lossy(&buf[..n as usize])
 }
 
 unsafe fn process_name(pid: u32) -> String {
@@ -518,26 +543,85 @@ pub fn set_layered(hwnd: i64, overlay: bool, translucent: bool, opacity: u8) -> 
 }
 
 /// Set (or, with an empty/whitespace string, clear) the user-chosen display name for a window.
-/// Stored in `MANAGED` alongside the window's identity so it persists across restarts.
+/// The name is written to the real window with `SetWindowTextW`, so it shows up in the window's
+/// title bar and its taskbar button. Clearing restores the original title we captured on the first
+/// rename. The entry (alias + original title + identity) is stored in `MANAGED` so the rename and
+/// its undo survive a restart of WinTamer.
 #[tauri::command]
 pub fn set_alias(hwnd: i64, alias: String) -> Result<(), String> {
     let trimmed = alias.trim();
-    let alias = if trimmed.is_empty() {
+    let new_alias = if trimmed.is_empty() {
         None
     } else {
         Some(trimmed.to_string())
     };
-    let (pid, proc_name) = unsafe { pid_and_proc(hwnd_from(hwnd)) };
+    let h = hwnd_from(hwnd);
+    let (pid, proc_name) = unsafe { pid_and_proc(h) };
 
     let snapshot = {
         let mut m = MANAGED.lock().map_err(|e| e.to_string())?;
         let entry = m.entry(hwnd as isize).or_insert_with(Managed::default);
         entry.pid = pid;
         entry.proc_name = proc_name;
-        entry.alias = alias;
+
+        match &new_alias {
+            Some(name) => {
+                // Remember the genuine title once, before our first rename overwrites it.
+                if entry.orig_title.is_none() {
+                    entry.orig_title = Some(unsafe { window_title(h) });
+                }
+                unsafe { set_window_text(h, name)? };
+            }
+            None => {
+                // Restore whatever the window was called before we touched it.
+                if let Some(orig) = entry.orig_title.take() {
+                    unsafe { set_window_text(h, &orig)? };
+                }
+            }
+        }
+        entry.alias = new_alias;
         m.clone()
     };
     save_persisted(&snapshot);
+    Ok(())
+}
+
+/// Apply `text` as a window's title (title bar + taskbar button) via `SetWindowTextW`.
+unsafe fn set_window_text(h: HWND, text: &str) -> Result<(), String> {
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    SetWindowTextW(h, PCWSTR(wide.as_ptr())).map_err(|e| e.to_string())
+}
+
+/// Bring a window to the front of its z-order band once and give it focus, without making it
+/// permanently topmost. We raise it with `BringWindowToTop` (which keeps it below any genuine
+/// always-on-top window of another app) and briefly attach to the current foreground thread's
+/// input queue so `SetForegroundWindow` isn't rejected by Windows' foreground-lock rules. A
+/// minimized window is restored first so it actually becomes visible.
+#[tauri::command]
+pub fn bring_to_front(hwnd: i64) -> Result<(), String> {
+    unsafe {
+        let h = hwnd_from(hwnd);
+        if !IsWindow(h).as_bool() {
+            return Err("대상 창을 찾을 수 없습니다".into());
+        }
+        if IsIconic(h).as_bool() {
+            let _ = ShowWindow(h, SW_RESTORE);
+        }
+
+        let fg = GetForegroundWindow();
+        let fg_thread = GetWindowThreadProcessId(fg, None);
+        let cur_thread = GetCurrentThreadId();
+        let attached = fg_thread != 0
+            && fg_thread != cur_thread
+            && AttachThreadInput(cur_thread, fg_thread, BOOL(1)).as_bool();
+
+        let _ = BringWindowToTop(h);
+        let _ = SetForegroundWindow(h);
+
+        if attached {
+            let _ = AttachThreadInput(cur_thread, fg_thread, BOOL(0));
+        }
+    }
     Ok(())
 }
 
@@ -568,12 +652,14 @@ mod tests {
                 pid: 999,
                 proc: "notepad.exe".into(),
                 alias: Some("내 메모장".into()),
+                orig_title: Some("제목 없음 - 메모장".into()),
             },
             StoredEntry {
                 hwnd: -42,
                 pid: 1,
                 proc: "explorer.exe".into(),
                 alias: None,
+                orig_title: None,
             },
         ];
         let json = serde_json::to_string(&entries).unwrap();
@@ -584,8 +670,10 @@ mod tests {
         assert_eq!(back[0].pid, 999);
         assert_eq!(back[0].proc, "notepad.exe");
         assert_eq!(back[0].alias.as_deref(), Some("내 메모장"));
+        assert_eq!(back[0].orig_title.as_deref(), Some("제목 없음 - 메모장"));
         assert_eq!(back[1].hwnd, -42);
         assert_eq!(back[1].alias, None);
+        assert_eq!(back[1].orig_title, None);
     }
 
     #[test]
@@ -609,5 +697,6 @@ mod tests {
         assert_eq!(back[0].hwnd, 7);
         assert_eq!(back[0].proc, "");
         assert_eq!(back[0].alias, None);
+        assert_eq!(back[0].orig_title, None);
     }
 }

@@ -77,6 +77,10 @@ function displayName(w) {
   const a = (w.alias || "").trim();
   return a || w.title;
 }
+// The window's genuine title: what we captured before renaming it, else its current title.
+function originalTitle(w) {
+  return (w.origTitle || "").trim() || w.title;
+}
 function filteredWindows() {
   const q = state.query.trim().toLowerCase();
   if (!q) return state.windows;
@@ -157,7 +161,7 @@ function listHTML(list) {
         w.alwaysOnTop || w.hiddenFromTaskbar || w.overlay || w.titleHidden || w.translucent || w.sizeLocked;
       const rowStyle = `display:flex;align-items:center;gap:10px;padding:8px 9px;margin:1px 0;border-radius:7px;cursor:pointer;transition:background .12s;${isSel ? "background:var(--sel);box-shadow:inset 2.5px 0 0 var(--accent)" : "background:transparent"}`;
       const iconStyle = `width:30px;height:30px;flex:none;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#fff;background:${colorFor(w.proc || w.app)}`;
-      return `<div class="row" data-act="select" data-id="${w.hwnd}" style="${rowStyle}">
+      return `<div class="row" data-act="select" data-id="${w.hwnd}" title="더블클릭: 이 창을 맨 앞으로 가져오기" style="${rowStyle}">
         <div style="${iconStyle}">${esc(initialFor(w.app, w.title))}</div>
         <div style="min-width:0;flex:1">
           <div style="font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)">${esc(displayName(w))}</div>
@@ -250,13 +254,13 @@ function rightHTML() {
         </div>
       </div>
 
-      <div style="font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text3);margin:16px 0 8px">표시 이름</div>
+      <div style="font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text3);margin:16px 0 8px">창 이름</div>
       <div style="background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px">
         <div style="display:flex;align-items:center;gap:8px">
-          <input data-act="alias" value="${escAttr(sel.alias || "")}" placeholder="${escAttr(sel.title)}" maxlength="120" style="flex:1;min-width:0;height:30px;border-radius:6px;border:1px solid var(--control-line);background:var(--control);color:var(--text);font-size:13px;padding:0 10px" />
+          <input data-act="alias" value="${escAttr(sel.alias || "")}" placeholder="${escAttr(originalTitle(sel))}" maxlength="120" style="flex:1;min-width:0;height:30px;border-radius:6px;border:1px solid var(--control-line);background:var(--control);color:var(--text);font-size:13px;padding:0 10px" />
           ${sel.alias ? `<div class="hov" data-act="alias-reset" title="원래 제목으로 되돌리기" style="width:30px;height:30px;flex:none;border-radius:6px;border:1px solid var(--control-line);background:var(--control);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text2);font-size:15px">↺</div>` : ""}
         </div>
-        <div style="font-size:11px;color:var(--text2);margin-top:7px">목록에 표시할 이름입니다. 비워두면 원래 제목(<span style="color:var(--text3)">${esc(sel.title)}</span>)을 사용합니다.</div>
+        <div style="font-size:11px;color:var(--text2);margin-top:7px">실제 창 제목(타이틀바·작업 표시줄)에 반영됩니다. 비워두면 원래 제목(<span style="color:var(--text3)">${esc(originalTitle(sel))}</span>)으로 되돌립니다.</div>
       </div>
 
       <div style="font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text3);margin:18px 0 8px">현재 적용 상태</div>
@@ -394,6 +398,15 @@ function queueLayered(w) {
   }, 40);
 }
 
+// Bring a window to the front once (a one-shot raise + focus, not a permanent topmost).
+async function bringToFront(id) {
+  try {
+    await invoke("bring_to_front", { hwnd: id });
+  } catch (err) {
+    console.error("bring_to_front failed:", err);
+  }
+}
+
 async function doRefresh() {
   state.refreshing = true;
   render();
@@ -448,6 +461,15 @@ function wireEvents() {
         await applyAlias("");
         break;
     }
+  });
+
+  card.addEventListener("dblclick", (e) => {
+    const t = e.target.closest('[data-act="select"]');
+    if (!t) return;
+    const id = Number(t.dataset.id);
+    state.selectedId = id;
+    render();
+    bringToFront(id);
   });
 
   card.addEventListener("input", (e) => {
