@@ -14,6 +14,7 @@ fn main() {
             win::set_geometry,
             win::set_layered,
             win::set_alias,
+            win::bring_to_front,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
