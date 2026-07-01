@@ -32,13 +32,13 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GetForegroundWindow, GetLayeredWindowAttributes,
-    GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    IsIconic, IsWindow, IsWindowVisible, SetForegroundWindow, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, GWL_EXSTYLE, GWL_STYLE,
-    HWND_NOTOPMOST, HWND_TOPMOST, LWA_ALPHA, SET_WINDOW_POS_FLAGS, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE, SW_SHOWNA, WS_CAPTION,
-    WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_THICKFRAME,
+    GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST, HWND_TOPMOST, LWA_ALPHA, SET_WINDOW_POS_FLAGS,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE,
+    SW_SHOWNA, WINDOWPLACEMENT, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_THICKFRAME,
 };
 
 /// What we remember about a window we have touched. The map key is the raw HWND (`isize`);
@@ -280,8 +280,23 @@ unsafe fn build_info(hwnd: HWND, managed: &HashMap<isize, Managed>) -> Option<Wi
     let proc_name = process_name(pid);
     let app = app_name(&proc_name, &title);
 
+    // GetWindowRect() reports the off-screen iconic position (around -32000, -32000) for a
+    // minimized window, which is meaningless to show as its size/position. GetWindowPlacement()'s
+    // rcNormalPosition instead gives the rect the window will restore to, so use that while iconic.
     let mut rect = RECT::default();
-    let _ = GetWindowRect(hwnd, &mut rect);
+    if IsIconic(hwnd).as_bool() {
+        let mut wp = WINDOWPLACEMENT {
+            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        if GetWindowPlacement(hwnd, &mut wp).is_ok() {
+            rect = wp.rcNormalPosition;
+        } else {
+            let _ = GetWindowRect(hwnd, &mut rect);
+        }
+    } else {
+        let _ = GetWindowRect(hwnd, &mut rect);
+    }
 
     let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
     let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;

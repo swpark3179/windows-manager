@@ -111,8 +111,8 @@ function toggleRow(w, key, label, desc, first) {
   </div>`;
 }
 
-function geomField(w, key, label, locked) {
-  const box = `display:flex;align-items:center;border-radius:6px;border:1px solid var(--control-line);background:var(--control);overflow:hidden;${locked ? "opacity:.45;pointer-events:none" : ""}`;
+function geomField(w, key, label) {
+  const box = `display:flex;align-items:center;border-radius:6px;border:1px solid var(--control-line);background:var(--control);overflow:hidden`;
   return `<div>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
       <span style="font-size:11px;color:var(--text2)">${esc(label)}</span>
@@ -239,8 +239,7 @@ function rightHTML() {
   const geom = ["x", "y", "w", "h"]
     .map((k) => {
       const label = { x: "위치 X", y: "위치 Y", w: "너비", h: "높이" }[k];
-      const locked = (k === "w" || k === "h") && sel.sizeLocked;
-      return geomField(sel, k, label, locked);
+      return geomField(sel, k, label);
     })
     .join("");
 
@@ -380,7 +379,6 @@ async function applyAlias(value) {
 async function bumpGeom(key, d) {
   const w = getSel();
   if (!w) return;
-  if ((key === "w" || key === "h") && w.sizeLocked) return;
   w[key] = Math.max(0, (Number(w[key]) || 0) + d);
   render();
   await applyGeom(w);
