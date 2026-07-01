@@ -18,7 +18,7 @@
 | 크기 고정 | `WS_THICKFRAME` 제거 (이동만 허용) |
 | 위치 X/Y · 너비/높이 | `SetWindowPos` |
 | 창 이름 변경 | `SetWindowTextW` — 실제 창의 타이틀바·작업 표시줄에 반영 (비우면 원래 제목 복원) |
-| 목록 더블클릭 | `BringWindowToTop` + `SetForegroundWindow` — 해당 창을 맨 앞으로 1회 (항상 위로는 무시 안 함) |
+| 맨 앞으로 (상세화면 버튼) | `BringWindowToTop` + `SetForegroundWindow` — 해당 창을 맨 앞으로 1회 (항상 위로는 무시 안 함) |
 
 검색·새로고침·라이트/다크 테마는 프런트엔드에서 처리합니다.
 

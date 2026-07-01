@@ -161,7 +161,7 @@ function listHTML(list) {
         w.alwaysOnTop || w.hiddenFromTaskbar || w.overlay || w.titleHidden || w.translucent || w.sizeLocked;
       const rowStyle = `display:flex;align-items:center;gap:10px;padding:8px 9px;margin:1px 0;border-radius:7px;cursor:pointer;transition:background .12s;${isSel ? "background:var(--sel);box-shadow:inset 2.5px 0 0 var(--accent)" : "background:transparent"}`;
       const iconStyle = `width:30px;height:30px;flex:none;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#fff;background:${colorFor(w.proc || w.app)}`;
-      return `<div class="row" data-act="select" data-id="${w.hwnd}" title="더블클릭: 이 창을 맨 앞으로 가져오기" style="${rowStyle}">
+      return `<div class="row" data-act="select" data-id="${w.hwnd}" title="클릭하여 선택" style="${rowStyle}">
         <div style="${iconStyle}">${esc(initialFor(w.app, w.title))}</div>
         <div style="min-width:0;flex:1">
           <div style="font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)">${esc(displayName(w))}</div>
@@ -252,6 +252,7 @@ function rightHTML() {
           <div style="font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(displayName(sel))}</div>
           <div style="font-size:11.5px;color:var(--text2);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(sel.app)} · ${esc(sel.proc)} · PID ${sel.pid}</div>
         </div>
+        <div class="hov" data-act="bring-front" title="이 창을 화면 맨 앞으로 가져오기" style="flex:none;height:30px;padding:0 12px;border-radius:7px;border:1px solid var(--control-line);background:var(--control);color:var(--text);font-size:12.5px;font-weight:500;display:flex;align-items:center;gap:6px;cursor:pointer">⤒ 맨 앞으로</div>
       </div>
 
       <div style="font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text3);margin:16px 0 8px">창 이름</div>
@@ -460,16 +461,12 @@ function wireEvents() {
       case "alias-reset":
         await applyAlias("");
         break;
+      case "bring-front": {
+        const w = getSel();
+        if (w) bringToFront(w.hwnd);
+        break;
+      }
     }
-  });
-
-  card.addEventListener("dblclick", (e) => {
-    const t = e.target.closest('[data-act="select"]');
-    if (!t) return;
-    const id = Number(t.dataset.id);
-    state.selectedId = id;
-    render();
-    bringToFront(id);
   });
 
   card.addEventListener("input", (e) => {
