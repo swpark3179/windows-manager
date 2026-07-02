@@ -62,6 +62,12 @@ struct StoredFile {
     /// 적용 전 SYSTEM 여부 (desktop.ini처럼 원래 SYSTEM인 파일에서 복원 시 SYSTEM을 지우지 않기 위함).
     #[serde(default)]
     orig_system: bool,
+    /// 바탕화면 파일을 숨기기 직전에 캡처한 아이콘 좌표. 해제 후 이 자리로 되돌린다.
+    /// `orig_hidden`이 `Some`인 동안에만 의미가 있으며, 복원과 함께 비워진다.
+    #[serde(default)]
+    orig_x: Option<i32>,
+    #[serde(default)]
+    orig_y: Option<i32>,
 }
 
 impl StoredFile {
@@ -221,6 +227,87 @@ fn resolve_folder(id: &str) -> Result<FolderInfo, String> {
     Err(format!("알 수 없는 폴더: {id}"))
 }
 
+/// 사용자·공용 바탕화면 디렉터리 경로(소문자). 바탕화면 아이콘 좌표를 관리할 대상 판별용.
+fn desktop_dirs() -> Vec<String> {
+    [&FOLDERID_Desktop, &FOLDERID_PublicDesktop]
+        .iter()
+        .filter_map(|g| known_folder(g))
+        .map(|p| p.to_string_lossy().to_lowercase())
+        .collect()
+}
+
+/// 이 파일이 바탕화면(사용자/공용) 바로 아래에 있는가 — 그렇다면 아이콘 좌표를 관리한다.
+fn is_desktop_path(path: &str) -> bool {
+    match Path::new(path).parent() {
+        Some(parent) => {
+            let p = parent.to_string_lossy().to_lowercase();
+            desktop_dirs().iter().any(|d| *d == p)
+        }
+        None => false,
+    }
+}
+
+/// 한 폴더 내 여러 파일의 완전 숨김 상태를 원하는 값(`desired`)으로 맞추는 배치 처리.
+/// 바탕화면 파일이면 숨기기 직전 좌표를 캡처하고, 해제 후 그 좌표로 되돌린다(전부 한 번의
+/// 데스크톱 뷰 접근으로 묶음 처리). 반환값은 개별 파일에서 발생한 오류 메시지 목록.
+fn apply_full_hidden(store: &mut FileStore, targets: &[(String, bool)]) -> Vec<String> {
+    // 1) 숨김으로 전환되는(현재 미적용) 바탕화면 파일들의 좌표를 먼저 캡처한다.
+    let to_capture: Vec<String> = targets
+        .iter()
+        .filter(|(p, desired)| {
+            *desired
+                && is_desktop_path(p)
+                && store.files.get(p).map_or(true, |e| e.orig_hidden.is_none())
+        })
+        .map(|(p, _)| p.clone())
+        .collect();
+    if !to_capture.is_empty() {
+        let positions = crate::desktop::capture_positions(&to_capture);
+        for (key, (x, y)) in positions {
+            // capture_positions 의 키는 소문자 경로. 원본 키와 매칭해 저장한다.
+            if let Some(orig) = to_capture.iter().find(|p| p.to_lowercase() == key) {
+                let e = store.files.entry(orig.clone()).or_default();
+                e.orig_x = Some(x);
+                e.orig_y = Some(y);
+            }
+        }
+    }
+
+    // 2) 속성을 적용/복원한다.
+    let mut errors = Vec::new();
+    for (path, desired) in targets {
+        if let Some(entry) = store.files.get_mut(path) {
+            if let Err(e) = reconcile(path, entry, *desired) {
+                errors.push(e);
+            }
+        }
+    }
+
+    // 3) 보임으로 전환된 바탕화면 파일 중 저장된 좌표가 있는 것들을 되돌린다.
+    let restores: Vec<(String, i32, i32)> = targets
+        .iter()
+        .filter(|(p, desired)| !*desired && is_desktop_path(p))
+        .filter_map(|(p, _)| {
+            let e = store.files.get(p)?;
+            match (e.orig_x, e.orig_y) {
+                (Some(x), Some(y)) => Some((p.clone(), x, y)),
+                _ => None,
+            }
+        })
+        .collect();
+    if !restores.is_empty() {
+        crate::desktop::restore_positions(&restores);
+        for (p, _, _) in &restores {
+            if let Some(e) = store.files.get_mut(p) {
+                e.orig_x = None;
+                e.orig_y = None;
+            }
+        }
+    }
+
+    errors
+}
+
 // ---------------------------------------------------------------------------
 // Listing payloads
 // ---------------------------------------------------------------------------
@@ -348,6 +435,8 @@ pub fn list_files(folder_id: String) -> Result<FolderListing, String> {
                     e.orig_hidden = None;
                     e.orig_system = false;
                     e.fully_hidden = false;
+                    e.orig_x = None;
+                    e.orig_y = None;
                     changed = true;
                 }
             }
@@ -468,21 +557,14 @@ pub fn set_group_hidden(group_id: String, hidden: bool) -> Result<(), String> {
         };
         g.hidden = hidden;
 
-        let mut errors: Vec<String> = Vec::new();
-        let member_paths: Vec<String> = store
+        // 그룹 멤버는 그룹 숨김이거나 개별 완전 숨김이면 숨긴 상태를 원한다.
+        let targets: Vec<(String, bool)> = store
             .files
             .iter()
             .filter(|(_, e)| e.group_id.as_deref() == Some(group_id.as_str()))
-            .map(|(p, _)| p.clone())
+            .map(|(p, e)| (p.clone(), hidden || e.fully_hidden))
             .collect();
-        for p in member_paths {
-            if let Some(entry) = store.files.get_mut(&p) {
-                let desired = hidden || entry.fully_hidden;
-                if let Err(e) = reconcile(&p, entry, desired) {
-                    errors.push(e);
-                }
-            }
-        }
+        let errors = apply_full_hidden(&mut store, &targets);
         (store.clone(), errors)
     };
     save_store(&snapshot);
@@ -503,22 +585,21 @@ pub fn ungroup_files(group_id: String) -> Result<(), String> {
         }
         store.groups.retain(|g| g.id != group_id);
 
-        let mut errors: Vec<String> = Vec::new();
+        // 멤버들을 그룹에서 떼어내고, (개별 완전 숨김이 아닌 한) 속성 복원을 원한다.
         let member_paths: Vec<String> = store
             .files
             .iter()
             .filter(|(_, e)| e.group_id.as_deref() == Some(group_id.as_str()))
             .map(|(p, _)| p.clone())
             .collect();
-        for p in member_paths {
-            if let Some(entry) = store.files.get_mut(&p) {
+        let mut targets = Vec::new();
+        for p in &member_paths {
+            if let Some(entry) = store.files.get_mut(p) {
                 entry.group_id = None;
-                let desired = entry.fully_hidden;
-                if let Err(e) = reconcile(&p, entry, desired) {
-                    errors.push(e);
-                }
+                targets.push((p.clone(), entry.fully_hidden));
             }
         }
+        let errors = apply_full_hidden(&mut store, &targets);
         store.files.retain(|_, e| !e.is_empty());
         (store.clone(), errors)
     };
@@ -533,25 +614,31 @@ pub fn ungroup_files(group_id: String) -> Result<(), String> {
 /// 파일 하나를 그룹에서 뺀다. 그룹이 숨김 상태였다면 (개별 완전 숨김이 아닌 한) 속성을 복원한다.
 #[tauri::command]
 pub fn remove_from_group(path: String) -> Result<(), String> {
-    let (snapshot, result) = {
+    let (snapshot, errors) = {
         let mut store = STORE.lock().map_err(|e| e.to_string())?;
-        let Some(entry) = store.files.get_mut(&path) else {
-            return Err("그룹에 속한 파일이 아닙니다".into());
+        let desired = match store.files.get_mut(&path) {
+            Some(entry) => {
+                entry.group_id = None;
+                entry.fully_hidden
+            }
+            None => return Err("그룹에 속한 파일이 아닙니다".into()),
         };
-        entry.group_id = None;
-        let desired = entry.fully_hidden;
-        let result = reconcile(&path, entry, desired);
+        let errors = apply_full_hidden(&mut store, &[(path.clone(), desired)]);
         store.files.retain(|_, e| !e.is_empty());
-        (store.clone(), result)
+        (store.clone(), errors)
     };
     save_store(&snapshot);
-    result
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
 }
 
 /// 파일 하나의 개별 완전 숨김을 켜거나 끈다. 숨김 그룹에 속해 있으면 속성은 유지된다.
 #[tauri::command]
 pub fn set_file_hidden(path: String, hidden: bool) -> Result<(), String> {
-    let (snapshot, result) = {
+    let (snapshot, errors) = {
         let mut store = STORE.lock().map_err(|e| e.to_string())?;
         let group_hidden = store
             .files
@@ -559,15 +646,18 @@ pub fn set_file_hidden(path: String, hidden: bool) -> Result<(), String> {
             .and_then(|e| e.group_id.clone())
             .map(|gid| store.groups.iter().any(|g| g.id == gid && g.hidden))
             .unwrap_or(false);
-        let entry = store.files.entry(path.clone()).or_default();
-        entry.fully_hidden = hidden;
+        store.files.entry(path.clone()).or_default().fully_hidden = hidden;
         let desired = hidden || group_hidden;
-        let result = reconcile(&path, entry, desired);
+        let errors = apply_full_hidden(&mut store, &[(path.clone(), desired)]);
         store.files.retain(|_, e| !e.is_empty());
-        (store.clone(), result)
+        (store.clone(), errors)
     };
     save_store(&snapshot);
-    result
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +678,8 @@ mod tests {
                 fully_hidden: true,
                 orig_hidden: Some(false),
                 orig_system: false,
+                orig_x: Some(320),
+                orig_y: Some(96),
             },
         );
         let store = FileStore {
@@ -609,6 +701,8 @@ mod tests {
         assert_eq!(f.group_id.as_deref(), Some("g1"));
         assert!(f.fully_hidden);
         assert_eq!(f.orig_hidden, Some(false));
+        assert_eq!(f.orig_x, Some(320));
+        assert_eq!(f.orig_y, Some(96));
     }
 
     #[test]
@@ -649,6 +743,54 @@ mod tests {
         assert_eq!(entry.orig_hidden, None);
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// 실제 커맨드 `set_file_hidden`을 통해 바탕화면 파일을 완전 숨김 → 해제했을 때
+    /// 아이콘이 숨기기 직전 좌표로 복귀하는지 검증하는 E2E 테스트. explorer 데스크톱이
+    /// 필요하므로 기본 실행에서 제외한다.
+    ///   실행: cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn full_hide_unhide_restores_desktop_position() {
+        use std::time::Duration;
+        let dir = known_folder(&FOLDERID_Desktop).expect("바탕화면 경로");
+        let path = dir.join("zz-wintamer-e2e.txt");
+        std::fs::write(&path, "e2e").unwrap();
+        let key = path.to_string_lossy().to_string();
+
+        // 아이콘이 나타날 때까지 잠시 기다린 뒤, 뚜렷한 위치로 옮겨 초기 좌표를 만든다.
+        std::thread::sleep(Duration::from_millis(600));
+        crate::desktop::restore_positions(&[(key.clone(), 360, 320)]);
+        std::thread::sleep(Duration::from_millis(300));
+        let before = crate::desktop::capture_positions(&[key.clone()]);
+        let p0 = *before
+            .get(&key.to_lowercase())
+            .expect("초기 아이콘 좌표를 찾지 못함 (자동 정렬이 켜져 있을 수 있음)");
+        println!("숨기기 전 좌표 = {p0:?}");
+
+        // 실제 커맨드로 완전 숨김 → 좌표가 스토어에 캡처되어야 한다.
+        set_file_hidden(key.clone(), true).unwrap();
+        {
+            let store = STORE.lock().unwrap();
+            let e = store.files.get(&key).expect("숨김 후 스토어 항목");
+            assert!(e.fully_hidden);
+            assert_eq!((e.orig_x, e.orig_y), (Some(p0.0), Some(p0.1)), "좌표 미캡처");
+        }
+
+        // 실제 커맨드로 해제 → 아이콘이 원래 좌표로 복귀해야 한다.
+        set_file_hidden(key.clone(), false).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        let after = crate::desktop::capture_positions(&[key.clone()]);
+        let p1 = *after.get(&key.to_lowercase()).expect("복귀 후 좌표");
+        println!("해제 후 좌표 = {p1:?}");
+        assert!(
+            (p0.0 - p1.0).abs() + (p0.1 - p1.1).abs() < 40,
+            "원래 자리로 복귀하지 못함: {p0:?} → {p1:?}"
+        );
+        // 해제 후에는 스토어 항목이 정리되어야 한다.
+        assert!(!STORE.lock().unwrap().files.contains_key(&key), "항목 미정리");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 // 창 관리자 (WinTamer) — Tauri 2.0 / Windows desktop only
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod desktop;
 mod files;
 mod win;
 
