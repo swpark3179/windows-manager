@@ -21,6 +21,7 @@ const state = {
   filesData: null, // 마지막 list_files 응답: {folder, files, groups}
   fileView: "manage", // "manage" | "preview"
   folderMenuOpen: false,
+  addToGroupMenuOpen: false,
   expandedGroupId: null,
   selectedFilePaths: [],
   newGroupName: "",
@@ -537,12 +538,32 @@ function filesRightHTML() {
   let body;
   if (isManage) {
     const selCount = state.selectedFilePaths.length;
+    const addMenu =
+      state.addToGroupMenuOpen && groups.length
+        ? `<div style="position:absolute;right:0;top:36px;z-index:30;min-width:160px;max-height:230px;overflow-y:auto;background:var(--card);border:1px solid var(--line);border-radius:8px;box-shadow:0 12px 34px rgba(0,0,0,.2);padding:4px;display:flex;flex-direction:column;gap:1px">
+            ${groups
+              .map(
+                (g) => `<div class="hov" data-act="add-to-group" data-id="${escAttr(g.id)}" style="display:flex;align-items:center;gap:8px;padding:8px 9px;border-radius:6px;cursor:pointer;font-size:12.5px;color:var(--text)">
+                <span style="width:8px;height:8px;flex:none;border-radius:50%;background:${g.hidden ? "#d24435" : "var(--accent)"}"></span>
+                <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(g.name)}</span>
+              </div>`
+              )
+              .join("")}
+          </div>`
+        : "";
+    const addBtn = groups.length
+      ? `<div style="position:relative;flex:none">
+          <div class="hov" data-act="add-menu" style="height:30px;padding:0 11px;border-radius:6px;border:1px solid var(--control-line);background:var(--control);font-size:12.5px;font-weight:500;color:var(--text);display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap">기존 그룹에 추가<span style="font-size:9px;color:var(--text3);transition:transform .15s;${state.addToGroupMenuOpen ? "transform:rotate(180deg)" : ""}">▾</span></div>
+          ${addMenu}
+        </div>`
+      : "";
     const selBar = selCount
-      ? `<div style="display:flex;align-items:center;gap:9px;margin-top:14px;padding:9px 11px;border-radius:9px;background:var(--sel);border:1px solid var(--accent)">
+      ? `<div style="display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-top:14px;padding:9px 11px;border-radius:9px;background:var(--sel);border:1px solid var(--accent)">
           <span style="font-size:12.5px;font-weight:600;color:var(--accent);white-space:nowrap">${selCount}개 선택됨</span>
           <div style="flex:1"></div>
-          <input class="search" data-act="group-name" value="${escAttr(state.newGroupName)}" placeholder="그룹 이름" style="height:30px;width:120px;border-radius:6px;border:1px solid var(--control-line);background:var(--control);padding:0 10px;font-size:12px;color:var(--text)" />
-          <div data-act="make-group" style="height:30px;padding:0 13px;border-radius:6px;background:var(--accent);color:var(--accent-text);font-size:12.5px;font-weight:600;display:flex;align-items:center;cursor:pointer;white-space:nowrap">그룹으로 묶기</div>
+          ${addBtn}
+          <input class="search" data-act="group-name" value="${escAttr(state.newGroupName)}" placeholder="새 그룹 이름" style="height:30px;width:110px;border-radius:6px;border:1px solid var(--control-line);background:var(--control);padding:0 10px;font-size:12px;color:var(--text)" />
+          <div data-act="make-group" style="height:30px;padding:0 13px;border-radius:6px;background:var(--accent);color:var(--accent-text);font-size:12.5px;font-weight:600;display:flex;align-items:center;cursor:pointer;white-space:nowrap">새 그룹</div>
           <div class="hov" data-act="clear-filesel" style="height:30px;padding:0 8px;border-radius:6px;font-size:12px;color:var(--text2);display:flex;align-items:center;cursor:pointer">해제</div>
         </div>`
       : "";
@@ -810,6 +831,12 @@ function wireEvents() {
       render();
       if (!t) return;
     }
+    // "기존 그룹에 추가" 드롭다운도 밖을 클릭하면 닫힌다.
+    if (state.addToGroupMenuOpen && act !== "add-menu" && act !== "add-to-group") {
+      state.addToGroupMenuOpen = false;
+      render();
+      if (!t) return;
+    }
     if (!t) return;
     switch (act) {
       case "tab-win":
@@ -832,6 +859,7 @@ function wireEvents() {
           state.selectedFilePaths = [];
           state.newGroupName = "";
           state.expandedGroupId = null;
+          state.addToGroupMenuOpen = false;
           state.fileOpError = null;
           await loadFiles();
         } else {
@@ -869,6 +897,23 @@ function wireEvents() {
         state.selectedFilePaths = [];
         state.newGroupName = "";
         await fileOp("group_files", { folderId: state.currentFolderId, name, paths });
+        break;
+      }
+      case "add-menu":
+        state.addToGroupMenuOpen = !state.addToGroupMenuOpen;
+        render();
+        break;
+      case "add-to-group": {
+        const id = t.dataset.id;
+        state.addToGroupMenuOpen = false;
+        if (!state.selectedFilePaths.length) {
+          render();
+          break;
+        }
+        const paths = state.selectedFilePaths.slice();
+        state.selectedFilePaths = [];
+        state.expandedGroupId = id; // 추가 결과를 바로 보여준다
+        await fileOp("add_to_group", { groupId: id, paths });
         break;
       }
       case "file-hide": {

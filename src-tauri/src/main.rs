@@ -20,6 +20,7 @@ fn main() {
             files::list_folders,
             files::list_files,
             files::group_files,
+            files::add_to_group,
             files::set_group_hidden,
             files::ungroup_files,
             files::remove_from_group,

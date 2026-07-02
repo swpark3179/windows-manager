@@ -547,6 +547,39 @@ pub fn group_files(folder_id: String, name: String, paths: Vec<String>) -> Resul
     Ok(info)
 }
 
+/// 이미 있는 그룹에 파일들을 추가한다. 다른 그룹에 속해 있던 파일은 이 그룹으로 옮긴다.
+/// 그룹이 이미 숨김 상태라면 새로 들어온 파일도 즉시 완전 숨김으로 맞추고, 보임 상태라면
+/// (개별 완전 숨김이 아닌 한) 파일 속성은 그대로 둔다 — 다른 숨김 그룹에서 옮겨 온 파일은
+/// 이 과정에서 원래 속성으로 복원된다.
+#[tauri::command]
+pub fn add_to_group(group_id: String, paths: Vec<String>) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("선택된 파일이 없습니다".into());
+    }
+    let (snapshot, errors) = {
+        let mut store = STORE.lock().map_err(|e| e.to_string())?;
+        let Some(g) = store.groups.iter().find(|g| g.id == group_id) else {
+            return Err("그룹을 찾을 수 없습니다".into());
+        };
+        let group_hidden = g.hidden;
+
+        let mut targets = Vec::new();
+        for p in &paths {
+            let entry = store.files.entry(p.clone()).or_default();
+            entry.group_id = Some(group_id.clone());
+            targets.push((p.clone(), group_hidden || entry.fully_hidden));
+        }
+        let errors = apply_full_hidden(&mut store, &targets);
+        (store.clone(), errors)
+    };
+    save_store(&snapshot);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
+}
+
 /// 그룹의 완전 숨김을 켜거나 끈다. 모든 멤버 파일의 실제 속성을 함께 맞춘다.
 #[tauri::command]
 pub fn set_group_hidden(group_id: String, hidden: bool) -> Result<(), String> {
