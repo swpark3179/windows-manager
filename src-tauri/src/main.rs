@@ -1,6 +1,7 @@
 // 창 관리자 (WinTamer) — Tauri 2.0 / Windows desktop only
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod files;
 mod win;
 
 fn main() {
@@ -15,6 +16,13 @@ fn main() {
             win::set_layered,
             win::set_alias,
             win::bring_to_front,
+            files::list_folders,
+            files::list_files,
+            files::group_files,
+            files::set_group_hidden,
+            files::ungroup_files,
+            files::remove_from_group,
+            files::set_file_hidden,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
